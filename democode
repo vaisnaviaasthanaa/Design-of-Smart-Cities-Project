@@ -1,0 +1,177 @@
+import pandas as pd
+import json
+import xml.etree.ElementTree as ET
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import pickle
+
+# -----------------------
+# Part 1: Data Labeling
+# -----------------------
+def auto_label_data(row):
+    """Detect and label data format as JSON, XML, or HL7."""
+    data = row["Data"].strip()
+    if data.startswith("{") and data.endswith("}"):
+        return "JSON"
+    elif data.startswith("<") and data.endswith(">"):
+        try:
+            ET.fromstring(data)  # Check if it's valid XML
+            return "XML"
+        except ET.ParseError:
+            return "Unknown"
+    elif "|" in data or "\n" in data and "PID" in data:
+        return "HL7"
+    else:
+        return "Unknown"
+
+# -----------------------
+# Part 2: Parser Functions
+# -----------------------
+def parse_json(data):
+    """Parse JSON format to extract universal fields."""
+    try:
+        parsed_data = json.loads(data)
+        return {
+            "patient_id": parsed_data.get("patient_id", "Unknown"),
+            "name": parsed_data.get("name", "Unknown"),
+            "gender": parsed_data.get("gender", "Unknown"),
+            "timestamp": parsed_data.get("timestamp", "Unknown"),
+            "birthdate": parsed_data.get("birthdate", "Unknown")
+        }
+    except json.JSONDecodeError:
+        return {}
+
+def parse_xml(data):
+    """Parse XML format to extract universal fields."""
+    try:
+        root = ET.fromstring(data)
+        parsed_data = {child.tag: child.text for child in root}
+        return {
+            "patient_id": parsed_data.get("patient_id", "Unknown"),
+            "name": parsed_data.get("name", "Unknown"),
+            "gender": parsed_data.get("gender", "Unknown"),
+            "timestamp": parsed_data.get("timestamp", "Unknown"),
+            "birthdate": parsed_data.get("birthdate", "Unknown")
+        }
+    except ET.ParseError:
+        return {}
+
+def parse_hl7(data):
+    """Parse HL7 format to extract universal fields."""
+    lines = data.split("\n")
+    parsed_data = {}
+    for line in lines:
+        if line.startswith("PID"):
+            fields = line.split("|")
+            parsed_data["patient_id"] = fields[3]
+            parsed_data["name"] = fields[5].replace("^", " ") if len(fields) > 5 else "Unknown"
+            parsed_data["birthdate"] = fields[7] if len(fields) > 7 else "Unknown"
+            parsed_data["gender"] = fields[8] if len(fields) > 8 else "Unknown"
+    return parsed_data
+
+# -----------------------
+# Part 3: Train the Model
+# -----------------------
+def train_format_classifier(dataset):
+    """Train a machine-learning model to classify data formats."""
+    vectorizer = CountVectorizer(analyzer="char", ngram_range=(2, 2))
+    X = vectorizer.fit_transform(dataset["Data"])
+    y = dataset["Label"]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    classifier = RandomForestClassifier()
+    classifier.fit(X_train, y_train)
+
+    # Evaluate the model
+    y_pred = classifier.predict(X_test)
+    # print("Classification Report:")
+    # print(classification_report(y_test, y_pred))
+
+    # Save the model and vectorizer
+    with open("middleware_model.pkl", "wb") as model_file:
+        pickle.dump((classifier, vectorizer), model_file)
+    print("Model trained and saved successfully.")
+
+# -----------------------
+# Part 4: Test the Model
+# -----------------------
+def test_format_classifier(test_dataset_path):
+    """Test the trained model using a new dataset."""
+    # Load the test dataset
+    test_dataset = pd.read_csv(test_dataset_path)
+
+    # Apply the auto_label_data function to the test dataset
+    test_dataset["Label"] = test_dataset.apply(auto_label_data, axis=1)
+
+    # Load the trained model and vectorizer
+    with open("middleware_model.pkl", "rb") as model_file:
+        model, vectorizer = pickle.load(model_file)
+
+    # Prepare test data
+    X_test = vectorizer.transform(test_dataset["Data"])
+    y_test = test_dataset["Label"]
+
+    # Predict using the model
+    y_pred = model.predict(X_test)
+
+    # Evaluate the model
+    report = classification_report(y_test, y_pred, output_dict=True)
+    classification_report_df = pd.DataFrame(report).transpose()
+
+
+    # Display the classification report
+    # print("Classification Report:")
+    # print(classification_report_df)
+
+    # Save the classification report as a CSV
+    # classification_report_path = "classification_report.csv"
+    # classification_report_df.to_csv(classification_report_path, index=True)
+    # print(f"Classification report saved to {classification_report_path}.")
+
+# -----------------------
+# Middleware Example
+# -----------------------
+def middleware_example():
+    """Example usage of the middleware."""
+    # Load the trained model
+    with open("middleware_model.pkl", "rb") as model_file:
+        model, vectorizer = pickle.load(model_file)
+
+    # Example data
+    example_data = '{"patient_id": "P145", "name": "Patient_56", "gender": "F", "timestamp": "2022-12-01T13:38:00Z", "birthdate": "1976-01-01"}'
+    data_vector = vectorizer.transform([example_data])
+    detected_format = model.predict(data_vector)[0]
+
+    # Convert to universal format
+    if detected_format == "JSON":
+        universal_format = parse_json(example_data)
+    elif detected_format == "XML":
+        universal_format = parse_xml(example_data)
+    elif detected_format == "HL7":
+        universal_format = parse_hl7(example_data)
+    else:
+        universal_format = {}
+
+    print(f"Detected Format: {detected_format}")
+    print(f"Universal Format: {universal_format}")
+
+# -----------------------
+# Main Execution
+# -----------------------
+if __name__ == "__main__":
+    # Step 1: Load and label the dataset
+    dataset_path = "shuffled_combined_dataset_test_final.csv"  # Replace with your dataset file path
+    dataset = pd.read_csv(dataset_path)
+    dataset["Label"] = dataset.apply(auto_label_data, axis=1)
+
+    # Step 2: Train the model
+    train_format_classifier(dataset)
+
+    # Step 3: Test the model
+    test_dataset_path = "combined_format_dataset.csv"  # Replace with your test dataset file path
+    test_format_classifier(test_dataset_path)
+
+    # Step 4: Run middleware example
+    middleware_example()
